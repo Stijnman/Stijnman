@@ -72,15 +72,28 @@ jobs:
             --repo "${GITHUB_WORKSPACE}" \
             --no-llm
 
-      - name: Detect SARIF output
+      - name: Prepare SARIF outputs
         id: sarif
         if: always()
         shell: bash
         run: |
-          if find "${RAPTOR_OUT_DIR}" -type f -name '*.sarif' -print -quit 2>/dev/null | grep -q .; then
-            echo "found=true" >> "${GITHUB_OUTPUT}"
+          set -euo pipefail
+          mkdir -p /tmp/raptor-sarif
+
+          SCAN_SARIF="$(find "${RAPTOR_OUT_DIR}" -type f -name combined.sarif -path '*/scan_*/*' -print -quit 2>/dev/null || true)"
+          if [ -n "${SCAN_SARIF}" ]; then
+            cp "${SCAN_SARIF}" /tmp/raptor-sarif/static.sarif
+            echo "static=true" >> "${GITHUB_OUTPUT}"
           else
-            echo "found=false" >> "${GITHUB_OUTPUT}"
+            echo "static=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+          SCA_SARIF="$(find "${RAPTOR_OUT_DIR}" -type f -name findings.sarif -path '*/sca_*/*' -print -quit 2>/dev/null || true)"
+          if [ -n "${SCA_SARIF}" ]; then
+            cp "${SCA_SARIF}" /tmp/raptor-sarif/sca.sarif
+            echo "sca=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "sca=false" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Upload RAPTOR reports
@@ -92,9 +105,16 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Publish SARIF to GitHub code scanning
-        if: ${{ !github.event.repository.private && steps.sarif.outputs.found == 'true' }}
+      - name: Publish static-analysis SARIF
+        if: ${{ !github.event.repository.private && steps.sarif.outputs.static == 'true' }}
         uses: github/codeql-action/upload-sarif@6bc82e05fd0ea64601dd4b465378bbcf57de0314 # v4.32.1
         with:
-          sarif_file: /tmp/raptor-out
-          category: raptor
+          sarif_file: /tmp/raptor-sarif/static.sarif
+          category: raptor-static
+
+      - name: Publish SCA SARIF
+        if: ${{ !github.event.repository.private && steps.sarif.outputs.sca == 'true' }}
+        uses: github/codeql-action/upload-sarif@6bc82e05fd0ea64601dd4b465378bbcf57de0314 # v4.32.1
+        with:
+          sarif_file: /tmp/raptor-sarif/sca.sarif
+          category: raptor-sca
