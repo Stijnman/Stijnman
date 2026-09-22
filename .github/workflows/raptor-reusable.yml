@@ -1,0 +1,93 @@
+name: RAPTOR reusable security scan
+
+on:
+  workflow_call:
+    inputs:
+      run_sca:
+        description: Run RAPTOR software-composition analysis
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  raptor:
+    name: RAPTOR static + supply-chain scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      _RAPTOR_TRUSTED: "1"
+      RAPTOR_OUT_DIR: ${{ runner.temp }}/raptor-out
+      RAPTOR_COMMIT: 7787ec5da81786c898b69a4e34a970cbc37ec417
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned RAPTOR
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/gadievron/raptor.git "${RUNNER_TEMP}/raptor"
+          git -C "${RUNNER_TEMP}/raptor" checkout --detach "${RAPTOR_COMMIT}"
+          python -m pip install --disable-pip-version-check -r "${RUNNER_TEMP}/raptor/requirements.txt"
+          python -m pip install --disable-pip-version-check semgrep
+
+      - name: RAPTOR doctor
+        shell: bash
+        run: python "${RUNNER_TEMP}/raptor/raptor.py" doctor
+
+      - name: Static security scan
+        shell: bash
+        run: |
+          mkdir -p "${RAPTOR_OUT_DIR}"
+          python "${RUNNER_TEMP}/raptor/raptor.py" scan \
+            --repo "${GITHUB_WORKSPACE}" \
+            --policy-groups secrets,injection
+
+      - name: Software composition analysis
+        if: ${{ inputs.run_sca }}
+        shell: bash
+        run: |
+          python "${RUNNER_TEMP}/raptor/raptor.py" sca \
+            --repo "${GITHUB_WORKSPACE}" \
+            --no-llm
+
+      - name: Detect SARIF output
+        id: sarif
+        if: always()
+        shell: bash
+        run: |
+          if find "${RAPTOR_OUT_DIR}" -type f -name '*.sarif' -print -quit 2>/dev/null | grep -q .; then
+            echo "found=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Upload RAPTOR reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: raptor-security-${{ github.run_id }}
+          path: ${{ runner.temp }}/raptor-out
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publish SARIF to GitHub code scanning
+        if: ${{ !github.event.repository.private && steps.sarif.outputs.found == 'true' }}
+        uses: github/codeql-action/upload-sarif@6bc82e05fd0ea64601dd4b465378bbcf57de0314 # v4.32.1
+        with:
+          sarif_file: ${{ runner.temp }}/raptor-out
+          category: raptor
